@@ -52,13 +52,10 @@ async def search_track(query: str):
         
         try:
             tracks = data["results"]["trackmatches"]["track"]
-            # Format response cleanly
             clean_results = [
                 {
                     "track": t["name"],
                     "artist": t["artist"],
-                    # Last.fm returns a list of images. We grab a medium/large one if it exists.
-                    "image": t["image"][2]["#text"] if len(t.get("image", [])) > 2 else None 
                 } for t in tracks
             ]
             return {"results": clean_results}
@@ -71,7 +68,7 @@ async def get_recommendations(req: RecommendRequest):
     if not req.seed_tracks or len(req.seed_tracks) > 4:
         raise HTTPException(status_code=400, detail="Provide between 1 and 4 seed tracks.")
 
-    recommendation_scores = defaultdict(lambda: {"score": 0, "artist": "", "image": "", "matched_seeds": []})
+    recommendation_scores = defaultdict(lambda: {"score": 0, "artist": "", "matched_seeds": []})
     
     async with httpx.AsyncClient() as client:
         # Fetch similar tracks
@@ -110,7 +107,6 @@ async def get_recommendations(req: RecommendRequest):
             "artist": data["artist"],
             "relatability_score": data["score"],
             "matched_because_of": data["matched_seeds"],
-            "image": data["image"]
         })
 
     formatted_results.sort(key=lambda x: x["relatability_score"], reverse=True)
