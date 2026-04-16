@@ -52,13 +52,10 @@ async def search_track(query: str):
         
         try:
             tracks = data["results"]["trackmatches"]["track"]
-            # Format response cleanly
             clean_results = [
                 {
                     "track": t["name"],
                     "artist": t["artist"],
-                    # Last.fm returns a list of images. We grab a medium/large one if it exists.
-                    "image": t["image"][2]["#text"] if len(t.get("image", [])) > 2 else None 
                 } for t in tracks
             ]
             return {"results": clean_results}
@@ -71,10 +68,9 @@ async def get_recommendations(req: RecommendRequest):
     if not req.seed_tracks or len(req.seed_tracks) > 4:
         raise HTTPException(status_code=400, detail="Provide between 1 and 4 seed tracks.")
 
-    recommendation_scores = defaultdict(lambda: {"score": 0, "artist": "", "image": "", "matched_seeds": []})
+    recommendation_scores = defaultdict(lambda: {"score": 0, "artist": "", "matched_seeds": []})
     
     async with httpx.AsyncClient() as client:
-        # Fetch similar tracks
         for seed in req.seed_tracks:
             data = await fetch_lastfm(client, "track.getsimilar", {"artist": seed.artist, "track": seed.track, "limit": 30})
             
@@ -91,11 +87,7 @@ async def get_recommendations(req: RecommendRequest):
                 recommendation_scores[key]["artist"] = artist
                 recommendation_scores[key]["track"] = name
                 recommendation_scores[key]["matched_seeds"].append(seed.track)
-                
-                if not recommendation_scores[key]["image"]:
-                     recommendation_scores[key]["image"] = sim_track["image"][2]["#text"] if len(sim_track.get("image", [])) > 2 else None
 
-    # Final Scoring: Add a multiplier if a song matched MULTIPLE seed tracks
     formatted_results = []
     for key, data in recommendation_scores.items():
         if any(seed.track.lower() == data["track"].lower() for seed in req.seed_tracks):
@@ -103,16 +95,40 @@ async def get_recommendations(req: RecommendRequest):
             
         match_count = len(data["matched_seeds"])
         if match_count > 1:
-            data["score"] = int(data["score"] * (1.5 * match_count)) # Bonus points
+            data["score"] = int(data["score"] * (1.5 * match_count))
             
         formatted_results.append({
             "track": data["track"],
             "artist": data["artist"],
             "relatability_score": data["score"],
-            "matched_because_of": data["matched_seeds"],
-            "image": data["image"]
+            "matched_because_of": data["matched_seeds"]
         })
 
     formatted_results.sort(key=lambda x: x["relatability_score"], reverse=True)
     
     return {"recommendations": formatted_results[:req.limit]}
+
+# Get Cover Art Using Itunes
+@app.get("/api/cover-art")
+async def get_itunes_cover(artist: str, track: str):
+    async with httpx.AsyncClient() as client:
+        try:
+            search_term = f"{artist} {track}"
+            params = {
+                "term": search_term,
+                "entity": "song",
+                "limit": 1
+            }
+            
+            response = await client.get("https://itunes.apple.com/search", params=params)
+            data = response.json()
+            
+            if data["resultCount"] > 0:
+                thumb_url = data["results"][0]["artworkUrl100"]
+                large_url = thumb_url.replace("100x100bb.jpg", "600x600bb.jpg")
+                return {"url": large_url}
+            
+            return {"url": None}
+        except Exception as e:
+            print(f"iTunes API Error: {e}")
+            return {"url": None}
