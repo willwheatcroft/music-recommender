@@ -1,8 +1,51 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import axios from 'axios'
 import { Search, X, Music, Loader2 } from 'lucide-react'
 
 const API_BASE_URL = 'http://localhost:8000/api'
+
+const CoverArt = ({ artist, track, sizeClass = "w-10 h-10", iconSize = 16 }) => {
+  const [imageUrl, setImageUrl] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchArt = async () => {
+      try {
+        const res = await axios.get(`${API_BASE_URL}/cover-art`, {
+          params: { artist, track }
+        });
+        
+        if (res.data.url) {
+          setImageUrl(res.data.url);
+        }
+      } catch (err) {
+        console.error("iTunes fetch failed", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchArt();
+  }, [artist, track]);
+
+  // Show default image if no cover is found
+  if (!loading && imageUrl) {
+    return (
+      <img
+        src={imageUrl}
+        alt={`${track} cover`}
+        className={`${sizeClass} rounded-md object-cover shadow-md transition-opacity duration-300`}
+        onError={() => setImageUrl(null)} 
+      />
+    );
+  }
+
+  return (
+    <div className={`${sizeClass} bg-gray-800 rounded-md flex items-center justify-center shadow-md`}>
+      <Music size={iconSize} className="text-gray-500" />
+    </div>
+  );
+};
 
 function App() {
   const [query, setQuery] = useState('')
@@ -116,13 +159,9 @@ function App() {
                   onClick={() => handleSelectTrack(result)}
                   className="flex items-center gap-4 p-3 hover:bg-gray-800 cursor-pointer transition-colors"
                 >
-                  {result.image ? (
-                    <img src={result.image} alt="Album Art" className="w-10 h-10 rounded-md object-cover" />
-                  ) : (
-                    <div className="w-10 h-10 bg-gray-800 rounded-md flex items-center justify-center">
-                      <Music size={16} className="text-gray-500" />
-                    </div>
-                  )}
+
+                  <CoverArt artist={result.artist} track={result.track} sizeClass="w-10 h-10" iconSize={16} />
+
                   <div>
                     <p className="font-medium text-white">{result.track}</p>
                     <p className="text-sm text-gray-400">{result.artist}</p>
@@ -143,7 +182,9 @@ function App() {
               {selectedTracks.map((track, idx) => (
                 <div key={idx} className="flex items-center justify-between bg-gray-800 p-3 rounded-xl">
                   <div className="flex items-center gap-3 truncate pr-4">
-                    {track.image && <img src={track.image} alt="" className="w-10 h-10 rounded-md" />}
+                    
+                    <CoverArt artist={track.artist} track={track.track} sizeClass="w-10 h-10" iconSize={16} />
+
                     <div className="truncate">
                       <p className="font-medium text-white truncate">{track.track}</p>
                       <p className="text-sm text-gray-400 truncate">{track.artist}</p>
@@ -180,6 +221,7 @@ function App() {
             )}
           </div>
         )}
+        
         {/* Results Section */}
         {recommendations.length > 0 && (
           <div className="mt-12 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -205,13 +247,9 @@ function App() {
                     <span className="text-gray-500 font-mono text-lg w-6 text-center">
                       #{idx + 1}
                     </span>
-                    {rec.image ? (
-                      <img src={rec.image} alt={rec.track} className="w-16 h-16 rounded-lg object-cover shadow-md" />
-                    ) : (
-                      <div className="w-16 h-16 bg-gray-800 rounded-lg flex items-center justify-center shadow-md">
-                        <Music size={24} className="text-gray-500" />
-                      </div>
-                    )}
+                    
+                    <CoverArt artist={rec.artist} track={rec.track} sizeClass="w-16 h-16" iconSize={24} />
+
                   </div>
 
                   {/* Track Info */}
