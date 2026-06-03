@@ -55,25 +55,31 @@ function App() {
   const [recommendations, setRecommendations] = useState([])
   const [isGenerating, setIsGenerating] = useState(false)
 
-  // Fetch search results from backend
-  const handleSearch = async (e) => {
+  // Update query state only
+  const handleQueryChange = (e) => {
     const value = e.target.value
     setQuery(value)
+    if (!value) setSearchResults([])
+  }
 
-    if (value.length < 3) {
-      setSearchResults([])
-      return
-    }
+  // Fetch search results from backend
+  const handleSearch = async () => {
+    if (!query.trim()) return
 
     setIsSearching(true)
     try {
-      const response = await axios.get(`${API_BASE_URL}/search?query=${value}`)
+      const response = await axios.get(`${API_BASE_URL}/search?query=${query}`)
       setSearchResults(response.data.results)
     } catch (error) {
       console.error("Error searching tracks:", error)
     } finally {
       setIsSearching(false)
     }
+  }
+
+  // Trigger search on Enter
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') handleSearch()
   }
 
   // Add/remove tracks
@@ -141,7 +147,8 @@ function App() {
             <input
               type="text"
               value={query}
-              onChange={handleSearch}
+              onChange={handleQueryChange}
+              onKeyDown={handleKeyDown}
               placeholder="Search for a song or artist..."
               className="w-full bg-gray-900 border border-gray-800 rounded-xl py-3 pl-12 pr-4 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
             />
