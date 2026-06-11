@@ -1,13 +1,10 @@
-import asyncio
-import math
 import os
 import json
 import re
-import unicodedata
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Any, List
+from typing import List
 import httpx
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
@@ -21,6 +18,7 @@ LASTFM_BASE_URL = "http://ws.audioscrobbler.com/2.0/"
 # Redis setup
 CACHE_TTL_SIMILAR   = 60 * 60 * 6   # Similar tracks:  6 hours 
 CACHE_TTL_COVER_ART = 60 * 60 * 24  # Cover art URLs:  24 hours
+CACHE_TTL_SEARCH    = 60 * 5        # Search results:  5 minutes
  
 redis_client = aioredis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
 
@@ -112,126 +110,16 @@ async def get_similar_tracks(client: httpx.AsyncClient, artist: str, track: str)
     await cache_set(cache_key, similar, CACHE_TTL_SIMILAR)
     return similar
 
-# Search relevance tuning knobs
 MAX_SEARCH_RESULTS = 10
-EXACT_TRACK_BOOST = 120
-TRACK_PREFIX_BOOST = 45
-FULL_TEXT_CONTAINS_BOOST = 25
-TOKEN_OVERLAP_MULTIPLIER = 10
-ARTIST_HINT_BOOST = 35
-TRACK_HINT_BOOST = 35
-LASTFM_RANK_DECAY = 1.5
-GETINFO_CONFIDENCE_BOOST = 200
+
+# Recommendation scoring
+SEED_RANK_POINTS = 30   # Points awarded to the #1 similar track; decreases by 1 per rank
+CROSS_SEED_BONUS = 15   # Flat bonus added per extra seed that also recommends this track
 
 
-def listeners_score(listeners_str: str) -> float:
-    """
-    Log-normalise a Last.fm listeners count into a comparable score bonus.
-    10M listeners = ~56 pts  |  1M = ~48  |  100K = ~40  |  1K = ~24
-    """
-    try:
-        return math.log10(int(listeners_str) + 1) * 8
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def normalize_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value)
-    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    normalized = normalized.lower()
-    normalized = re.sub(r"[^\w\s]", " ", normalized)
-    return re.sub(r"\s+", " ", normalized).strip()
-
-
-def tokenize(value: str) -> list[str]:
-    return [token for token in normalize_text(value).split(" ") if token]
-
-
-def parse_query_hints(query: str) -> tuple[str | None, str | None]:
-    lowered = query.strip()
-    if not lowered:
-        return None, None
-
-    if " - " in lowered:
-        artist_hint, track_hint = lowered.split(" - ", 1)
-        return normalize_text(artist_hint), normalize_text(track_hint)
-
-    by_match = re.match(r"(.+)\s+by\s+(.+)", lowered, flags=re.IGNORECASE)
-    if by_match:
-        track_hint = normalize_text(by_match.group(1))
-        artist_hint = normalize_text(by_match.group(2))
-        return artist_hint, track_hint
-
-    return None, None
-
-
-def parse_raw_hints(query: str) -> tuple[str | None, str | None]:
-    """
-    Like parse_query_hints but returns (artist, track) with original casing and
-    punctuation intact. This is used for direct Last.fm API calls where normalisation
-    would mangle names like 'AC/DC' or 'Sigur Rós'.
-    """
-    q = query.strip()
-    if " - " in q:
-        artist_part, track_part = q.split(" - ", 1)
-        return artist_part.strip(), track_part.strip()
-    by_match = re.match(r"(.+)\s+by\s+(.+)", q, flags=re.IGNORECASE)
-    if by_match:
-        return by_match.group(2).strip(), by_match.group(1).strip()
-    return None, None
-
-
-def score_candidate(
-    query: str,
-    track_name: str,
-    artist_name: str,
-    index: int,
-    artist_hint: str | None,
-    track_hint: str | None,
-    listeners: str = "0",
-) -> int:
-    normalized_query = normalize_text(query)
-    normalized_track = normalize_text(track_name)
-    normalized_artist = normalize_text(artist_name)
-    combined_text = f"{normalized_track} {normalized_artist}".strip()
-
-    score = 0
-
-    if normalized_track == normalized_query:
-        score += EXACT_TRACK_BOOST
-
-    if normalized_query and normalized_track.startswith(normalized_query):
-        score += TRACK_PREFIX_BOOST
-
-    if normalized_query and normalized_query in combined_text:
-        score += FULL_TEXT_CONTAINS_BOOST
-
-    query_tokens = set(tokenize(query))
-    candidate_tokens = set(tokenize(f"{track_name} {artist_name}"))
-    if query_tokens:
-        overlap = query_tokens.intersection(candidate_tokens)
-        score += len(overlap) * TOKEN_OVERLAP_MULTIPLIER
-
-    if artist_hint and artist_hint in normalized_artist:
-        score += ARTIST_HINT_BOOST
-    if track_hint and track_hint in normalized_track:
-        score += TRACK_HINT_BOOST
-
-    # Popularity: log-normalised listener count from Last.fm
-    score += int(listeners_score(listeners))
-
-    # Bias
-    score -= int(index * LASTFM_RANK_DECAY)
-    return score
-
-
-def extract_image(track_entry: dict[str, Any]) -> str | None:
-    images = track_entry.get("image", [])
-    if isinstance(images, list):
-        for image in reversed(images):
-            if isinstance(image, dict) and image.get("#text"):
-                return image["#text"]
-    return None
+def sanitise_artist(name: str) -> str:
+    """Strip Last.fm metadata noise appended to artist names (e.g. '• Recommended for you')."""
+    return re.split(r"\s*[•·]\s*", name)[0].strip()
 
 
 # Search for Tracks
@@ -241,105 +129,45 @@ async def search_track(query: str):
     if not query:
         return {"results": []}
 
-    artist_hint, track_hint = parse_query_hints(query)
-    raw_artist, raw_track   = parse_raw_hints(query)
+    cache_key = f"search::{query.lower()}"
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        print(f"[Cache] HIT  - search: {query}")
+        return {"results": cached}
+    print(f"[Cache] MISS - search: {query}  ->  calling iTunes")
 
     async with httpx.AsyncClient() as client:
-        tasks: list = [
-            fetch_lastfm(client, "track.search", {"track": query, "limit": 30})
-        ]
-
-        if raw_artist and raw_track:
-            tasks.append(
-                fetch_lastfm(client, "track.getInfo", {
-                    "artist": raw_artist,
-                    "track":  raw_track,
-                })
+        try:
+            response = await client.get(
+                "https://itunes.apple.com/search",
+                params={"term": query, "entity": "song", "limit": MAX_SEARCH_RESULTS}
             )
+            if not response.text.strip():
+                return {"results": []}
+            data = response.json()
+        except Exception as e:
+            print(f"[Search] iTunes error: {e}")
+            return {"results": []}
 
-        gathered = await asyncio.gather(*tasks, return_exceptions=True)
+    results = []
+    for item in data.get("results", []):
+        track_name  = item.get("trackName", "").strip()
+        artist_name = item.get("artistName", "").strip()
+        artwork     = item.get("artworkUrl100", "") or ""
+        if artwork:
+            artwork = artwork.replace("100x100bb.jpg", "600x600bb.jpg")
 
-    search_data  = gathered[0] if not isinstance(gathered[0], Exception) else {}
-    getinfo_data = (
-        gathered[1]
-        if len(gathered) > 1 and not isinstance(gathered[1], Exception)
-        else None
-    )
-
-    tracks = search_data.get("results", {}).get("trackmatches", {}).get("track", [])
-    if isinstance(tracks, dict):
-        tracks = [tracks]
-    if not isinstance(tracks, list):
-        tracks = []
-
-    deduped: dict[tuple[str, str], dict[str, Any]] = {}
-
-    if getinfo_data and "track" in getinfo_data:
-        info        = getinfo_data["track"]
-        track_name  = str(info.get("name", "")).strip()
-        artist_obj  = info.get("artist", {})
-        artist_name = str(
-            artist_obj.get("name", "") if isinstance(artist_obj, dict) else artist_obj
-        ).strip()
-
-        if track_name and artist_name:
-            dedupe_key = (normalize_text(track_name), normalize_text(artist_name))
-            deduped[dedupe_key] = {
-                "track":          track_name,
-                "artist":         artist_name,
-                "image":          extract_image(info),
-                "score":          GETINFO_CONFIDENCE_BOOST + int(listeners_score(info.get("listeners", "0"))),
-                "original_index": -1,
-            }
-            print(f"[Search] track.getInfo hit - {artist_name} / {track_name}")
-
-    for index, track_entry in enumerate(tracks):
-        if not isinstance(track_entry, dict):
-            continue
-
-        track_name  = str(track_entry.get("name", "")).strip()
-        artist_name = str(track_entry.get("artist", "")).strip()
         if not track_name or not artist_name:
             continue
 
-        candidate = {
-            "track":          track_name,
-            "artist":         artist_name,
-            "image":          extract_image(track_entry),
-            "score":          score_candidate(
-                query=query,
-                track_name=track_name,
-                artist_name=artist_name,
-                index=index,
-                artist_hint=artist_hint,
-                track_hint=track_hint,
-                listeners=track_entry.get("listeners", "0"),
-            ),
-            "original_index": index,
-        }
+        results.append({
+            "track":  track_name,
+            "artist": artist_name,
+            "image":  artwork or None,
+        })
 
-        dedupe_key = (normalize_text(track_name), normalize_text(artist_name))
-        existing   = deduped.get(dedupe_key)
-        if not existing or (
-            candidate["score"], -candidate["original_index"]
-        ) > (existing["score"], -existing["original_index"]):
-            deduped[dedupe_key] = candidate
-
-    ranked_results = sorted(
-        deduped.values(),
-        key=lambda c: (c["score"], -c["original_index"]),
-        reverse=True,
-    )
-
-    clean_results = [
-        {
-            "track":  c["track"],
-            "artist": c["artist"],
-            "image":  c["image"],
-        }
-        for c in ranked_results[:MAX_SEARCH_RESULTS]
-    ]
-    return {"results": clean_results}
+    await cache_set(cache_key, results, CACHE_TTL_SEARCH)
+    return {"results": results}
 
 # Get Recommendations & Calculate Score
 @app.post("/api/recommend")
@@ -356,7 +184,7 @@ async def get_recommendations(req: RecommendRequest):
             
             for index, sim_track in enumerate(similar_tracks):
                 name = sim_track["name"]
-                artist = sim_track["artist"]["name"]
+                artist = sanitise_artist(sim_track["artist"]["name"])
                 key = f"{name}||{artist}"
                 
                 points = 30 - index 
@@ -373,7 +201,7 @@ async def get_recommendations(req: RecommendRequest):
             
         match_count = len(data["matched_seeds"])
         if match_count > 1:
-            data["score"] = int(data["score"] * (1.5 * match_count))
+            data["score"] += CROSS_SEED_BONUS * (match_count - 1)
             
         formatted_results.append({
             "track": data["track"],
@@ -409,6 +237,8 @@ async def get_itunes_cover(artist: str, track: str):
             }
             
             response = await client.get("https://itunes.apple.com/search", params=params)
+            if not response.text.strip():
+                return {"url": None}
             data = response.json()
             
             if data["resultCount"] > 0:
