@@ -1,41 +1,19 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import axios from 'axios'
 import { Search, X, Music, Loader2 } from 'lucide-react'
 
 const API_BASE_URL = 'http://localhost:8000/api'
 
-const CoverArt = ({ artist, track, sizeClass = "w-10 h-10", iconSize = 16 }) => {
-  const [imageUrl, setImageUrl] = useState(null);
-  const [loading, setLoading] = useState(true);
+const CoverArt = ({ url, sizeClass = "w-10 h-10", iconSize = 16 }) => {
+  const [errored, setErrored] = useState(false);
 
-  useEffect(() => {
-    const fetchArt = async () => {
-      try {
-        const res = await axios.get(`${API_BASE_URL}/cover-art`, {
-          params: { artist, track }
-        });
-        
-        if (res.data.url) {
-          setImageUrl(res.data.url);
-        }
-      } catch (err) {
-        console.error("iTunes fetch failed", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchArt();
-  }, [artist, track]);
-
-  // Show default image if no cover is found
-  if (!loading && imageUrl) {
+  if (url && !errored) {
     return (
       <img
-        src={imageUrl}
-        alt={`${track} cover`}
-        className={`${sizeClass} rounded-md object-cover shadow-md transition-opacity duration-300`}
-        onError={() => setImageUrl(null)} 
+        src={url}
+        alt="cover art"
+        className={`${sizeClass} rounded-md object-cover shadow-md`}
+        onError={() => setErrored(true)}
       />
     );
   }
@@ -54,26 +32,33 @@ function App() {
   const [isSearching, setIsSearching] = useState(false)
   const [recommendations, setRecommendations] = useState([])
   const [isGenerating, setIsGenerating] = useState(false)
+  const [recArtMap, setRecArtMap] = useState({})
 
-  // Fetch search results from backend
-  const handleSearch = async (e) => {
+  // Update query state only
+  const handleQueryChange = (e) => {
     const value = e.target.value
     setQuery(value)
+    if (!value) setSearchResults([])
+  }
 
-    if (value.length < 3) {
-      setSearchResults([])
-      return
-    }
+  // Fetch search results from backend
+  const handleSearch = async () => {
+    if (!query.trim()) return
 
     setIsSearching(true)
     try {
-      const response = await axios.get(`${API_BASE_URL}/search?query=${value}`)
+      const response = await axios.get(`${API_BASE_URL}/search?query=${query}`)
       setSearchResults(response.data.results)
     } catch (error) {
       console.error("Error searching tracks:", error)
     } finally {
       setIsSearching(false)
     }
+  }
+
+  // Trigger search on Enter
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') handleSearch()
   }
 
   // Add/remove tracks
@@ -99,6 +84,7 @@ function App() {
     if (selectedTracks.length === 0) return
     
     setIsGenerating(true)
+    setRecArtMap({})
     try {
       const payload = {
         seed_tracks: selectedTracks.map(t => ({ artist: t.artist, track: t.track })),
@@ -106,7 +92,24 @@ function App() {
       }
       
       const response = await axios.post(`${API_BASE_URL}/recommend`, payload)
-      setRecommendations(response.data.recommendations)
+      const recs = response.data.recommendations
+      setRecommendations(recs)
+
+      // Fetch all cover art in the background at once
+      Promise.all(
+        recs.map(async (rec) => {
+          try {
+            const res = await axios.get(`${API_BASE_URL}/cover-art`, {
+              params: { artist: rec.artist, track: rec.track }
+            })
+            return [rec.track + '||' + rec.artist, res.data.url ?? null]
+          } catch {
+            return [rec.track + '||' + rec.artist, null]
+          }
+        })
+      ).then(entries => setRecArtMap(Object.fromEntries(entries)))
+        .catch(() => {})
+
     } catch (error) {
       console.error("Error generating recommendations:", error)
       alert("Failed to generate recommendations. Is Python backend running?")
@@ -119,6 +122,7 @@ function App() {
   const handleReset = () => {
     setSelectedTracks([])
     setRecommendations([])
+    setRecArtMap({})
     setQuery('')
   }
 
@@ -141,7 +145,8 @@ function App() {
             <input
               type="text"
               value={query}
-              onChange={handleSearch}
+              onChange={handleQueryChange}
+              onKeyDown={handleKeyDown}
               placeholder="Search for a song or artist..."
               className="w-full bg-gray-900 border border-gray-800 rounded-xl py-3 pl-12 pr-4 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
             />
@@ -160,7 +165,7 @@ function App() {
                   className="flex items-center gap-4 p-3 hover:bg-gray-800 cursor-pointer transition-colors"
                 >
 
-                  <CoverArt artist={result.artist} track={result.track} sizeClass="w-10 h-10" iconSize={16} />
+                  <CoverArt url={result.image} sizeClass="w-10 h-10" iconSize={16} />
 
                   <div>
                     <p className="font-medium text-white">{result.track}</p>
@@ -183,7 +188,7 @@ function App() {
                 <div key={idx} className="flex items-center justify-between bg-gray-800 p-3 rounded-xl">
                   <div className="flex items-center gap-3 truncate pr-4">
                     
-                    <CoverArt artist={track.artist} track={track.track} sizeClass="w-10 h-10" iconSize={16} />
+                    <CoverArt url={track.image} sizeClass="w-10 h-10" iconSize={16} />
 
                     <div className="truncate">
                       <p className="font-medium text-white truncate">{track.track}</p>
@@ -228,7 +233,7 @@ function App() {
             <div className="flex justify-between items-end mb-6">
               <div>
                 <h2 className="text-2xl font-bold text-white">Recommendations</h2>
-                <p className="text-gray-400 text-sm mt-1">Sorted by relatability score (/30)</p>
+                <p className="text-gray-400 text-sm mt-1">Sorted by relatability score</p>
               </div>
               <button 
                 onClick={handleReset}
@@ -248,7 +253,7 @@ function App() {
                       #{idx + 1}
                     </span>
                     
-                    <CoverArt artist={rec.artist} track={rec.track} sizeClass="w-16 h-16" iconSize={24} />
+                    <CoverArt url={recArtMap[rec.track + '||' + rec.artist] ?? null} sizeClass="w-16 h-16" iconSize={24} />
 
                   </div>
 
